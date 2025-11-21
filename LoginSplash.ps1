@@ -1,201 +1,184 @@
-# LoginLight - Intelligent Startup Splash Screen
-# Displays full-screen video on all monitors with CPU-aware looping
+# LoginSplash.ps1 - Ultimate Edition
+# Optimisé pour bloquer les autres fenêtres au démarrage
 
-# Set high priority for faster startup
+# 1. Boost de priorité immédiat
 $process = [System.Diagnostics.Process]::GetCurrentProcess()
 $process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
 
-# Force STA mode
+# 2. Vérification STA
 if ($Host.Runspace.ApartmentState -ne "STA") {
-  powershell.exe -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File $MyInvocation.MyCommand.Path
-  exit
+    powershell.exe -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File $MyInvocation.MyCommand.Path
+    exit
 }
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
-# Configuration
+# --- CONFIGURATION ---
 $videoPath = Join-Path $PSScriptRoot "assets\login.mp4"
-$initialWaitSeconds = 3
 $cpuHighThreshold = 80
-$cpuLowThreshold = 50
-$cpuCheckIntervalMs = 1000
-$fadeOutDurationSeconds = 1.5
-$maxTimeoutSeconds = 60
+$cpuLowThreshold = 40
+$minDurationSeconds = 4
+$fadeOutDuration = 1.5
+$maxTimeoutSeconds = 45
 
-# Script-level state
+# --- VARIABLES GLOBALES ---
 $script:windows = @()
-$script:cpuMonitorActive = $false
 $script:canExit = $false
 $script:fadingOut = $false
-$script:completedCount = 0
-$script:timeoutTimer = $null
+$script:startTime = [DateTime]::Now
+$script:escCount = 0  # Pour le Kill-Switch
+
+# Import pour forcer le premier plan (API Windows)
+$signature = @"
+[DllImport("user32.dll")]
+public static extern bool SetForegroundWindow(IntPtr hWnd);
+"@
+Add-Type -MemberDefinition $signature -Name "Win32" -Namespace Win32Functions
 
 function Get-CpuUsage {
-  $cpu = Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction SilentlyContinue
-  if ($cpu) {
-    return [math]::Round($cpu.CounterSamples[0].CookedValue, 2)
-  }
-  return 0
-}
-
-function Start-CpuMonitoring {
-  $script:cpuMonitorActive = $true
-  
-  $timer = New-Object System.Windows.Threading.DispatcherTimer
-  $timer.Interval = [TimeSpan]::FromMilliseconds($script:cpuCheckIntervalMs)
-  
-  $timer.Add_Tick({
-    if (-not $script:cpuMonitorActive) {
-      $this.Stop()
-      return
+    try {
+        $cpu = Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction Stop -SampleInterval 1 -MaxSamples 1
+        return [math]::Round($cpu.CounterSamples.CookedValue, 0)
     }
-    
-    $cpuUsage = Get-CpuUsage
-    
-    if ($cpuUsage -ge $script:cpuHighThreshold) {
-      foreach ($win in $script:windows) {
-        $mediaElement = $win.Tag
-        if ($mediaElement.LoadedBehavior -ne [System.Windows.Controls.MediaState]::Manual) {
-          $mediaElement.LoadedBehavior = [System.Windows.Controls.MediaState]::Manual
-        }
-        $mediaElement.Play()
-      }
-      $script:canExit = $false
-    }
-    elseif ($cpuUsage -le $script:cpuLowThreshold -and -not $script:fadingOut) {
-      $script:canExit = $true
-    }
-  })
-  
-  $timer.Start()
+    catch { return 100 }
 }
 
 function Start-FadeOut {
-  if ($script:fadingOut) { return }
-  $script:fadingOut = $true
-  $script:cpuMonitorActive = $false
-  $script:completedCount = 0
-  
-  if ($script:timeoutTimer) {
-    $script:timeoutTimer.Stop()
-  }
-  
-  $totalWindows = $script:windows.Count
-  
-  foreach ($win in $script:windows) {
-    $storyboard = New-Object System.Windows.Media.Animation.Storyboard
-    $fadeAnimation = New-Object System.Windows.Media.Animation.DoubleAnimation
-    $fadeAnimation.From = 1.0
-    $fadeAnimation.To = 0.0
-    $fadeAnimation.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds($script:fadeOutDurationSeconds))
+    if ($script:fadingOut) { return }
+    $script:fadingOut = $true
     
-    [System.Windows.Media.Animation.Storyboard]::SetTarget($fadeAnimation, $win)
-    [System.Windows.Media.Animation.Storyboard]::SetTargetProperty($fadeAnimation, [System.Windows.PropertyPath]::new("Opacity"))
-    
-    $storyboard.Children.Add($fadeAnimation)
-    
-    $storyboard.Add_Completed({
-      $script:completedCount++
-      if ($script:completedCount -ge $totalWindows) {
-        [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
-      }
-    })
-    
-    $storyboard.Begin()
-  }
-}
+    # Arrêt des surveillances
+    if ($script:monitoringTimer) { $script:monitoringTimer.Stop() }
+    if ($script:zOrderTimer) { $script:zOrderTimer.Stop() }
 
-function Create-FullScreenWindow {
-  param([System.Windows.Forms.Screen]$screen)
-  
-  $window = New-Object System.Windows.Window
-  $window.WindowStyle = [System.Windows.WindowStyle]::None
-  $window.ResizeMode = [System.Windows.ResizeMode]::NoResize
-  $window.Topmost = $true
-  $window.Left = $screen.Bounds.Left
-  $window.Top = $screen.Bounds.Top
-  $window.Width = $screen.Bounds.Width
-  $window.Height = $screen.Bounds.Height
-  $window.WindowState = [System.Windows.WindowState]::Normal
-  $window.Background = [System.Windows.Media.Brushes]::Black
-  $window.ShowInTaskbar = $false
-  $window.Cursor = [System.Windows.Input.Cursors]::None
-  
-  $grid = New-Object System.Windows.Controls.Grid
-  
-  $mediaElement = New-Object System.Windows.Controls.MediaElement
-  $mediaElement.Source = [Uri]::new($videoPath)
-  $mediaElement.LoadedBehavior = [System.Windows.Controls.MediaState]::Manual
-  $mediaElement.UnloadedBehavior = [System.Windows.Controls.MediaState]::Close
-  $mediaElement.Stretch = [System.Windows.Media.Stretch]::UniformToFill
-  $mediaElement.Volume = 0.5
-  
-  $mediaElement.Add_MediaEnded({
-    if ($script:canExit) {
-      Start-FadeOut
-    } else {
-      $this.Position = [TimeSpan]::Zero
-      $this.Play()
+    $completedCount = 0
+    $totalWindows = $script:windows.Count
+
+    foreach ($win in $script:windows) {
+        $storyboard = New-Object System.Windows.Media.Animation.Storyboard
+        
+        # Animation Opacité (Visuel)
+        $fadeVisuel = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $fadeVisuel.From = 1.0
+        $fadeVisuel.To = 0.0
+        $fadeVisuel.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds($fadeOutDuration))
+        [System.Windows.Media.Animation.Storyboard]::SetTarget($fadeVisuel, $win)
+        [System.Windows.Media.Animation.Storyboard]::SetTargetProperty($fadeVisuel, [System.Windows.PropertyPath]::new("Opacity"))
+        
+        # Animation Volume (Audio - baisse le son progressivement)
+        $mediaElement = $win.Tag
+        if ($mediaElement) {
+            $fadeAudio = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $fadeAudio.From = $mediaElement.Volume
+            $fadeAudio.To = 0.0
+            $fadeAudio.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds($fadeOutDuration))
+            [System.Windows.Media.Animation.Storyboard]::SetTarget($fadeAudio, $mediaElement)
+            [System.Windows.Media.Animation.Storyboard]::SetTargetProperty($fadeAudio, [System.Windows.PropertyPath]::new("Volume"))
+            $storyboard.Children.Add($fadeAudio)
+        }
+
+        $storyboard.Children.Add($fadeVisuel)
+        
+        $storyboard.Add_Completed({
+            $completedCount++
+            if ($completedCount -ge $totalWindows) {
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
+            }
+        })
+        $storyboard.Begin()
     }
-  })
-  
-  $mediaElement.Add_MediaOpened({
-    $this.Play()
-  })
-  
-  $mediaElement.Add_MediaFailed({
-    param($sender, $e)
-    [void][System.Windows.MessageBox]::Show("Video failed to load: $($e.ErrorException.Message)", "LoginLight Error")
-  })
-  
-  $mediaElement.Add_Loaded({
-    $this.Play()
-  })
-  
-  [void]$grid.Children.Add($mediaElement)
-  $window.Content = $grid
-  $window.Tag = $mediaElement
-  
-  return $window
 }
 
-# Main execution
+function Create-Window {
+    param([System.Windows.Forms.Screen]$screen)
+
+    $window = New-Object System.Windows.Window
+    $window.WindowStyle = [System.Windows.WindowStyle]::None
+    $window.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $window.Topmost = $true
+    $window.Background = [System.Windows.Media.Brushes]::Black
+    $window.Left = $screen.Bounds.Left
+    $window.Top = $screen.Bounds.Top
+    $window.Width = $screen.Bounds.Width
+    $window.Height = $screen.Bounds.Height
+    $window.ShowInTaskbar = $false
+    $window.Cursor = [System.Windows.Input.Cursors]::None
+
+    # Gestion du Kill-Switch (Appuyer 5 fois sur Echap)
+    $window.Add_KeyDown({
+        if ($_.Key -eq [System.Windows.Input.Key]::Escape) {
+            $script:escCount++
+            if ($script:escCount -ge 5) { [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown() }
+        }
+    })
+
+    $grid = New-Object System.Windows.Controls.Grid
+    
+    $mediaElement = New-Object System.Windows.Controls.MediaElement
+    $mediaElement.Source = [Uri]::new($videoPath)
+    $mediaElement.LoadedBehavior = [System.Windows.Controls.MediaState]::Manual
+    $mediaElement.UnloadedBehavior = [System.Windows.Controls.MediaState]::Close
+    $mediaElement.Stretch = [System.Windows.Media.Stretch]::UniformToFill
+    $mediaElement.Volume = 0.5 # Volume par défaut
+
+    $mediaElement.Add_MediaEnded({
+        $elapsed = ([DateTime]::Now - $script:startTime).TotalSeconds
+        if ($script:canExit -and $elapsed -ge $minDurationSeconds) {
+            Start-FadeOut
+        } else {
+            $this.Position = [TimeSpan]::Zero
+            $this.Play()
+        }
+    })
+    $mediaElement.Add_Loaded({ $this.Play() })
+    
+    [void]$grid.Children.Add($mediaElement)
+    $window.Content = $grid
+    $window.Tag = $mediaElement
+    return $window
+}
+
 try {
-  if (-not (Test-Path $videoPath)) {
-    [void][System.Windows.MessageBox]::Show("Video file not found: $videoPath`n`nPlease place login.mp4 in the assets folder.", "LoginLight Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
-    exit 1
-  }
-  
-  $screens = [System.Windows.Forms.Screen]::AllScreens
-  
-  foreach ($screen in $screens) {
-    $window = Create-FullScreenWindow -screen $screen
-    $script:windows += $window
-  }
-  
-  foreach ($win in $script:windows) {
-    [void]$win.Show()
-  }
-  
-  $initialTimer = New-Object System.Windows.Threading.DispatcherTimer
-  $initialTimer.Interval = [TimeSpan]::FromSeconds($initialWaitSeconds)
-  $initialTimer.Add_Tick({
-    $this.Stop()
-    Start-CpuMonitoring
-  })
-  $initialTimer.Start()
-  
-  $script:timeoutTimer = New-Object System.Windows.Threading.DispatcherTimer
-  $script:timeoutTimer.Interval = [TimeSpan]::FromSeconds($maxTimeoutSeconds)
-  $script:timeoutTimer.Add_Tick({
-    $this.Stop()
-    Start-FadeOut
-  })
-  $script:timeoutTimer.Start()
-  
-  [System.Windows.Threading.Dispatcher]::Run()
+    if (-not (Test-Path $videoPath)) { exit }
+
+    $screens = [System.Windows.Forms.Screen]::AllScreens
+    foreach ($screen in $screens) {
+        $win = Create-Window -screen $screen
+        $script:windows += $win
+        [void]$win.Show()
+    }
+
+    # Timer de surveillance CPU
+    $script:monitoringTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:monitoringTimer.Interval = [TimeSpan]::FromMilliseconds(1000)
+    $script:monitoringTimer.Add_Tick({
+        $elapsed = ([DateTime]::Now - $script:startTime).TotalSeconds
+        if ($elapsed -ge $maxTimeoutSeconds) { Start-FadeOut; return }
+        
+        if ($elapsed -ge 3) {
+            $usage = Get-CpuUsage
+            if ($usage -le $cpuLowThreshold) { $script:canExit = $true } 
+            else { $script:canExit = $false }
+        }
+    })
+    $script:monitoringTimer.Start()
+
+    # TIMER WATCHDOG (Le garde du corps)
+    # Vérifie 4 fois par seconde si la fenêtre est bien devant
+    $script:zOrderTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:zOrderTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:zOrderTimer.Add_Tick({
+        if (-not $script:fadingOut) {
+            foreach ($win in $script:windows) {
+                if (-not $win.Topmost) { $win.Topmost = $true }
+                # Force brute pour passer devant Discord/Steam
+                $hwnd = new-object IntPtr $win.Handle
+                [Win32Functions.Win32]::SetForegroundWindow($hwnd) | Out-Null
+            }
+        }
+    })
+    $script:zOrderTimer.Start()
+
+    [System.Windows.Threading.Dispatcher]::Run()
 }
-catch {
-  [void][System.Windows.MessageBox]::Show("Error: $($_.Exception.Message)`n`nStack: $($_.ScriptStackTrace)", "LoginLight Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
-  exit 1
-}
+catch { exit }
