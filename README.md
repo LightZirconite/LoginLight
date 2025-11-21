@@ -8,7 +8,23 @@
 ✅ **Full-screen on all monitors** (multi-display support)  
 ✅ **CPU-aware intelligent looping** (adapts to system load)  
 ✅ **Smooth fade-out transition** (professional exit)  
-✅ **Native PowerShell + WPF** (no external dependencies)
+✅ **Native PowerShell + WPF** (no external dependencies)  
+✅ **One-line installer** (downloads everything automatically)
+
+---
+
+## Quick Install
+
+**Copy and paste this command in PowerShell (Admin not required):**
+
+```powershell
+irm https://raw.githubusercontent.com/LightZirconite/LoginLight/main/Install-Startup.ps1 | iex
+```
+
+✅ Downloads `LoginSplash.ps1` and `login.mp4` from GitHub  
+✅ Installs to `%LOCALAPPDATA%\LoginLight\`  
+✅ Registers to Windows Startup folder  
+✅ Ready on next login!
 
 ---
 
@@ -16,63 +32,58 @@
 
 1. **Startup**: Launches automatically when you log into Windows
 2. **Display**: Shows `login.mp4` full-screen on all monitors
-3. **Initial wait**: Plays for 5 seconds minimum
+3. **Initial wait**: Plays for 3 seconds minimum
 4. **CPU monitoring**: 
    - If CPU ≥ 80% → **loops video** (system busy with startup tasks)
    - If CPU ≤ 50% → **prepares to exit** (system ready)
-5. **Exit**: Waits for video to complete, then fades out smoothly
+5. **Safety**: Auto-exits after 60 seconds if system remains busy
+6. **Exit**: Waits for video to complete, then fades out smoothly
 
 ---
 
-## Installation
+## Manual Installation
 
-### 1. Add Your Video
-
-Place your video file as `login.mp4` in the `assets` folder:
-
-```
-LoginLight/
-├── assets/
-│   └── login.mp4  ← Your video here
-├── LoginSplash.ps1
-├── Install-Startup.ps1
-└── Uninstall-Startup.ps1
-```
-
-**Supported formats**: MP4, AVI, WMV (MP4 recommended)
-
-### 2. Enable Startup
+### 1. Download & Install
 
 Right-click `Install-Startup.ps1` → **Run with PowerShell**
 
-This registers the app to start automatically at Windows login.
+This automatically downloads all files from GitHub and sets up startup.
 
-### 3. Test
+### 2. Test
 
-Log out and log back in, or run manually:
+Log out and log back in to see it at startup, or test manually:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File LoginSplash.ps1
+& "$env:LOCALAPPDATA\LoginLight\LoginSplash.ps1"
 ```
 
 ---
 
 ## Uninstallation
 
-Right-click `Uninstall-Startup.ps1` → **Run with PowerShell**
+**One-line uninstaller:**
+
+```powershell
+irm https://raw.githubusercontent.com/LightZirconite/LoginLight/main/Uninstall-Startup.ps1 | iex
+```
+
+Or download and run `Uninstall-Startup.ps1` manually.
+
+This removes the startup shortcut and deletes all installed files from `%LOCALAPPDATA%\LoginLight\`.
 
 ---
 
 ## Configuration
 
-Edit `LoginSplash.ps1` to customize behavior:
+Edit `LoginSplash.ps1` in `%LOCALAPPDATA%\LoginLight\` to customize:
 
 ```powershell
-$initialWaitSeconds = 5           # Minimum display time
+$initialWaitSeconds = 3            # Minimum display time
 $cpuHighThreshold = 80             # CPU % to keep looping
 $cpuLowThreshold = 50              # CPU % to allow exit
 $cpuCheckIntervalMs = 1000         # CPU check frequency (ms)
 $fadeOutDurationSeconds = 1.5      # Fade-out animation duration
+$maxTimeoutSeconds = 60            # Safety timeout (force exit)
 ```
 
 ---
@@ -87,11 +98,12 @@ At Windows startup, many background services and applications load simultaneousl
 - Smooth transition to desktop when system is ready
 - No abrupt closure while apps are still loading
 
-### Registry Location
+### Installation Location
 
-Startup entry: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\LoginLight`
+- **Files**: `%LOCALAPPDATA%\LoginLight\` (e.g., `C:\Users\YourName\AppData\Local\LoginLight\`)
+- **Startup**: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\LoginLight.lnk`
 
-This is a **user-level** startup (not system-wide), requiring no administrator privileges.
+This is a **user-level** installation (not system-wide), requiring no administrator privileges.
 
 ### Performance
 
