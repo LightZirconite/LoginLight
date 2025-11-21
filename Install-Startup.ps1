@@ -25,7 +25,7 @@ $scriptPath = Join-Path $installDir "LoginSplash.ps1"
 $assetsDir = Join-Path $installDir "assets"
 $videoPath = Join-Path $assetsDir "login.mp4"
 
-# Liens GitHub (A VERIFIER: Assure-toi que ces liens pointent bien vers tes fichiers bruts/raw)
+# Liens GitHub
 $githubBaseUrl = "https://raw.githubusercontent.com/LightZirconite/LoginLight/refs/heads/main"
 $scriptUrl = "$githubBaseUrl/LoginSplash.ps1"
 $videoUrl = "$githubBaseUrl/assets/login.mp4"
@@ -35,7 +35,6 @@ Write-Host "Mode: Administrateur (High Priority System Task)" -ForegroundColor G
 Write-Host ""
 
 # --- 1. Nettoyage ---
-# On supprime l'ancien raccourci shell:startup s'il existe (car il est trop lent)
 $startupFolder = [Environment]::GetFolderPath('Startup')
 $oldShortcut = Join-Path $startupFolder "$appName.lnk"
 if (Test-Path $oldShortcut) {
@@ -80,41 +79,43 @@ if (-not (Test-Path $videoPath)) {
     Write-Host "La vidéo existe déjà, on la conserve." -ForegroundColor Gray
 }
 
-# --- 4. Configuration du Planificateur de Tâches (Le Secret) ---
+# --- 4. Configuration du Planificateur de Tâches (CORRIGÉ) ---
 Write-Host ""
 Write-Host "Création de la tâche planifiée haute priorité..." -ForegroundColor Yellow
 
 $taskName = "LoginLightSystem"
-# On récupère le nom de l'utilisateur actuel pour que la tâche se lance sur SA session
-# Note: En mode Admin, [Environment]::UserName peut parfois donner "SYSTEM", donc on reste prudent
-# On va configurer la tâche pour s'exécuter pour le groupe "Users" au moment du logon interactif
+# CORRECTION ICI : On cible l'utilisateur courant explicitement au lieu du groupe "Users"
+# Cela corrige l'erreur XML 0x80041318
+$targetUser = $env:USERNAME 
 
 try {
     # Action : Lancer PowerShell caché sans profil
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
     
-    # Déclencheur : À l'ouverture de session de n'importe quel utilisateur
+    # Déclencheur : À l'ouverture de session
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     
-    # Paramètres : Priorité Temps Réel (0), permet le démarrage sur batterie
+    # Paramètres : Priorité Temps Réel (0)
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -Priority 0
     
-    # Désinscrire l'ancienne tâche si elle existe pour éviter les doublons
+    # Principal : On définit l'utilisateur ET le niveau de privilège ici
+    $principal = New-ScheduledTaskPrincipal -UserId $targetUser -LogonType Interactive -RunLevel Highest
+
+    # Désinscrire l'ancienne tâche si elle existe
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     
-    # Création de la tâche
-    # -RunLevel Highest : C'est ça qui donne les droits Admin au script de démarrage
-    # -User : On utilise "NT AUTHORITY\INTERACTIVE" pour cibler l'utilisateur qui se connecte physiquement
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User "BUILTIN\Users" -RunLevel Highest -Force | Out-Null
+    # Création de la tâche avec l'objet Principal corrigé
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
     
     Write-Host "✅ TÂCHE CRÉÉE AVEC SUCCÈS !" -ForegroundColor Green
     Write-Host ""
-    Write-Host "LoginLight est maintenant configuré en mode prioritaire." -ForegroundColor Cyan
-    Write-Host "Il démarrera AVANT les applications classiques (Discord, Steam, etc.)" -ForegroundColor Cyan
+    Write-Host "LoginLight est maintenant configuré pour l'utilisateur : $targetUser" -ForegroundColor Cyan
+    Write-Host "Il démarrera AVANT les applications classiques." -ForegroundColor Cyan
 }
 catch {
     Write-Host "❌ ERREUR CRITIQUE lors de la création de la tâche." -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "Code erreur : $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Détail : $($_.FullyQualifiedErrorId)" -ForegroundColor DarkRed
 }
 
 Write-Host ""
