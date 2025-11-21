@@ -1,23 +1,22 @@
 # Install-Startup.ps1
-# Installe LoginLight avec priorité MAXIMALE via le Planificateur de Tâches
-# Inclut l'auto-élévation en Administrateur
+# Installs LoginLight with High Priority via Windows Task Scheduler
+# Language: English | Mode: Admin Auto-Elevation
 
-# --- 0. AUTO-ÉLÉVATION EN ADMINISTRATEUR ---
+# --- 0. ADMIN SELF-ELEVATION ---
 $currentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
-    Write-Host "Besoin des droits Administrateur pour configurer le démarrage rapide..." -ForegroundColor Yellow
-    Write-Host "Relancement du script en mode Admin..." -ForegroundColor Cyan
+    Write-Host "Admin rights are required to configure high-priority startup..." -ForegroundColor Yellow
+    Write-Host "Restarting script as Administrator..." -ForegroundColor Cyan
     
-    # Relance le même script avec l'argument "RunAs" qui déclenche le prompt UAC
+    # Relaunch self with "RunAs" (triggers UAC prompt)
     Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
     
-    # On quitte l'instance non-admin
     exit
 }
 
-# --- DÉBUT DE L'INSTALLATION (Mode Admin confirmé) ---
+# --- START INSTALLATION (Admin Mode) ---
 
 $appName = "LoginLight"
 $installDir = Join-Path $env:LOCALAPPDATA $appName
@@ -25,99 +24,99 @@ $scriptPath = Join-Path $installDir "LoginSplash.ps1"
 $assetsDir = Join-Path $installDir "assets"
 $videoPath = Join-Path $assetsDir "login.mp4"
 
-# Liens GitHub
+# --- GITHUB CONFIGURATION ---
+# Ensure these URLs point to the RAW versions of your files
 $githubBaseUrl = "https://raw.githubusercontent.com/LightZirconite/LoginLight/refs/heads/main"
 $scriptUrl = "$githubBaseUrl/LoginSplash.ps1"
 $videoUrl = "$githubBaseUrl/assets/login.mp4"
 
+Clear-Host
 Write-Host "=== LoginLight Ultimate Installer ===" -ForegroundColor Cyan
-Write-Host "Mode: Administrateur (High Priority System Task)" -ForegroundColor Green
+Write-Host "Mode: Administrator (High Priority System Task)" -ForegroundColor Green
 Write-Host ""
 
-# --- 1. Nettoyage ---
+# --- 1. CLEANUP LEGACY SHORTCUTS ---
+# We remove the old 'shell:startup' shortcut because it is too slow.
 $startupFolder = [Environment]::GetFolderPath('Startup')
 $oldShortcut = Join-Path $startupFolder "$appName.lnk"
 if (Test-Path $oldShortcut) {
-    Write-Host "Suppression de l'ancien raccourci lent..." -ForegroundColor Yellow
+    Write-Host "Removing legacy startup shortcut (too slow)..." -ForegroundColor Yellow
     Remove-Item $oldShortcut -Force
 }
 
-# --- 2. Création des dossiers ---
+# --- 2. CREATE DIRECTORIES ---
 if (-not (Test-Path $installDir)) {
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-    Write-Host "Dossier créé : $installDir" -ForegroundColor Gray
+    Write-Host "Created directory: $installDir" -ForegroundColor Gray
 }
 if (-not (Test-Path $assetsDir)) {
     New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
 }
 
-# --- 3. Téléchargement des fichiers ---
-Write-Host "Téléchargement du script LoginSplash.ps1..." -ForegroundColor Yellow
+# --- 3. DOWNLOAD FILES ---
+Write-Host "Downloading LoginSplash.ps1..." -ForegroundColor Yellow
 try {
     Invoke-WebRequest -Uri $scriptUrl -OutFile $scriptPath -UseBasicParsing -ErrorAction Stop
-    Write-Host "  OK." -ForegroundColor Green
+    Write-Host "  Success." -ForegroundColor Green
 }
 catch {
-    Write-Host "  ERREUR: Impossible de télécharger le script." -ForegroundColor Red
-    Write-Host "  Message: $($_.Exception.Message)" -ForegroundColor Red
-    Read-Host "Appuyez sur Entrée pour quitter"
+    Write-Host "  ERROR: Failed to download script." -ForegroundColor Red
+    Write-Host "  Details: $($_.Exception.Message)" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
     exit
 }
 
 if (-not (Test-Path $videoPath)) {
-    Write-Host "Téléchargement de la vidéo..." -ForegroundColor Yellow
+    Write-Host "Downloading video (login.mp4)..." -ForegroundColor Yellow
     try {
         Invoke-WebRequest -Uri $videoUrl -OutFile $videoPath -UseBasicParsing -ErrorAction Stop
-        Write-Host "  OK." -ForegroundColor Green
+        Write-Host "  Success." -ForegroundColor Green
     }
     catch {
-        Write-Host "  ERREUR: Impossible de télécharger la vidéo." -ForegroundColor Red
-        Read-Host "Appuyez sur Entrée pour quitter"
+        Write-Host "  ERROR: Failed to download video." -ForegroundColor Red
+        Read-Host "Press Enter to exit"
         exit
     }
 } else {
-    Write-Host "La vidéo existe déjà, on la conserve." -ForegroundColor Gray
+    Write-Host "Video file already exists. Skipping download." -ForegroundColor Gray
 }
 
-# --- 4. Configuration du Planificateur de Tâches (CORRIGÉ) ---
+# --- 4. CONFIGURE TASK SCHEDULER ---
 Write-Host ""
-Write-Host "Création de la tâche planifiée haute priorité..." -ForegroundColor Yellow
+Write-Host "Configuring High-Priority System Task..." -ForegroundColor Yellow
 
 $taskName = "LoginLightSystem"
-# CORRECTION ICI : On cible l'utilisateur courant explicitement au lieu du groupe "Users"
-# Cela corrige l'erreur XML 0x80041318
 $targetUser = $env:USERNAME 
 
 try {
-    # Action : Lancer PowerShell caché sans profil
+    # Action: Run PowerShell hidden, no profile, bypassing execution policy
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
     
-    # Déclencheur : À l'ouverture de session
+    # Trigger: At user LogOn
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     
-    # Paramètres : Priorité Temps Réel (0)
+    # Settings: Priority 0 (RealTime), Allow on Battery, No network requirement
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -Priority 0
     
-    # Principal : On définit l'utilisateur ET le niveau de privilège ici
+    # Principal: Run as the specific user with HIGHEST privileges (Admin)
     $principal = New-ScheduledTaskPrincipal -UserId $targetUser -LogonType Interactive -RunLevel Highest
 
-    # Désinscrire l'ancienne tâche si elle existe
+    # Remove old task if exists
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     
-    # Création de la tâche avec l'objet Principal corrigé
+    # Register the new task
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
     
-    Write-Host "✅ TÂCHE CRÉÉE AVEC SUCCÈS !" -ForegroundColor Green
+    Write-Host "SUCCESS: Task created!" -ForegroundColor Green
     Write-Host ""
-    Write-Host "LoginLight est maintenant configuré pour l'utilisateur : $targetUser" -ForegroundColor Cyan
-    Write-Host "Il démarrera AVANT les applications classiques." -ForegroundColor Cyan
+    Write-Host "LoginLight is now installed for user: $targetUser" -ForegroundColor Cyan
+    Write-Host "It will launch BEFORE other applications on next login." -ForegroundColor Cyan
 }
 catch {
-    Write-Host "❌ ERREUR CRITIQUE lors de la création de la tâche." -ForegroundColor Red
-    Write-Host "Code erreur : $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "Détail : $($_.FullyQualifiedErrorId)" -ForegroundColor DarkRed
+    Write-Host "CRITICAL ERROR while creating task." -ForegroundColor Red
+    Write-Host "Message: $($_.Exception.Message)" -ForegroundColor Red
 }
 
 Write-Host ""
-Write-Host "Appuyez sur une touche pour fermer..."
+Write-Host "Press any key to close..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
