@@ -1,12 +1,12 @@
-# LoginSplash.ps1 - V9 "Auto-Update Edition"
-# Features: System Lock, Clean Exit, and BACKGROUND SELF-UPDATE
-# Language: English
+# LoginSplash.ps1 - V10 "Smart Edition"
+# Features: System Lock, Clean Exit, Background Update, & Smart CPU Monitoring
+# Language: English (Logic), French comments
 
-# 1. MAX PRIORITY
+# 1. PRIORITÉ MAXIMALE
 $process = [System.Diagnostics.Process]::GetCurrentProcess()
 $process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
 
-# 2. FORCE STA MODE
+# 2. FORCER LE MODE STA (Requis pour WPF)
 if ($Host.Runspace.ApartmentState -ne "STA") {
     powershell.exe -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File $MyInvocation.MyCommand.Path
     exit
@@ -24,112 +24,128 @@ $ghBase = "https://raw.githubusercontent.com/LightZirconite/LoginLight/refs/head
 $urlScript = "$ghBase/LoginSplash.ps1"
 $urlVideo  = "$ghBase/assets/login.mp4"
 
-# SETTINGS
-$minExecutionTime = 12        # Minimum lock time (seconds)
-$cpuIdleThreshold = 30        # Unlock if CPU < 30%
-$fadeOutDuration  = 0.8
-$maxTimeoutSeconds = 90
+# --- REGLAGES INTELLIGENTS ---
+$minExecutionTime  = 10      # Temps mini (secondes) avant même de penser à sortir
+$cpuIdleThreshold  = 40      # Si le CPU est sous 40%
+$cpuStableCount    = 3       # Il doit rester bas pendant 3 vérifications de suite (évite les faux positifs)
+$maxTimeoutSeconds = 90      # Sécurité : on sort quoiqu'il arrive après 90s
+$checkInterval     = 1.0     # Vérifier chaque seconde
 
-# --- STATE ---
+# --- ETAT DU SCRIPT ---
 $script:windows = @()
 $script:startTime = [DateTime]::Now
 $script:canExit = $false
 $script:isFadingOut = $false
 $script:escCount = 0
+$script:lowCpuStreak = 0 # Compteur de stabilité CPU
 
-# --- NATIVE API ---
+# --- COMPTEUR DE PERFORMANCE (.NET - Beaucoup plus rapide que Get-Counter) ---
+try {
+    $script:cpuCounter = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
+    $null = $script:cpuCounter.NextValue() # La première valeur est toujours 0, on l'ignore
+} catch {
+    # Fallback si erreur WMI
+    $script:cpuCounter = $null
+}
+
+# --- NATIVE API (Lock Input / Topmost) ---
 $signature = @"
 [DllImport("user32.dll")]
 public static extern bool LockSetForegroundWindow(uint uLockCode);
-[DllImport("user32.dll")]
-public static extern bool SetForegroundWindow(IntPtr hWnd);
 [DllImport("user32.dll", SetLastError = true)]
 public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 "@
 Add-Type -MemberDefinition $signature -Name "Win32" -Namespace Win32Functions
 
-# --- UPDATE ENGINE (The Invisible Worker) ---
+# --- MOTEUR DE MISE A JOUR (Invisible) ---
 function Start-BackgroundUpdate {
-    # This function creates a temporary script that runs AFTER we close.
-    
     $updaterCode = @"
     param(`$TargetScript, `$TargetVideo, `$UrlScript, `$UrlVideo)
-    
-    # 1. Wait for the main app to close completely
     Start-Sleep -Seconds 5
-    
     try {
-        # 2. Update Script (Always check/overwrite small files)
         Invoke-WebRequest -Uri `$UrlScript -OutFile `$TargetScript -UseBasicParsing -ErrorAction Stop
-        
-        # 3. Update Video (Smart Check - Only if size differs)
         if (Test-Path `$TargetVideo) {
             `$localSize = (Get-Item `$TargetVideo).Length
             try {
                 `$head = Invoke-WebRequest -Uri `$UrlVideo -Method Head -UseBasicParsing
                 `$remoteSize = `$head.Headers.'Content-Length'
-                
                 if (`$remoteSize -ne `$null -and `$localSize -ne `$remoteSize) {
                     Invoke-WebRequest -Uri `$UrlVideo -OutFile `$TargetVideo -UseBasicParsing
                 }
-            } catch { 
-                # Use existing video if network fails
-            }
+            } catch {}
         }
-    } catch {
-        # Silent failure (internet issues), will try again next boot
-    }
+    } catch {}
 "@
-
-    # Write the updater to the Temp folder
     $tempUpdater = Join-Path $env:TEMP "LoginLightUpdater.ps1"
     $updaterCode | Out-File -FilePath $tempUpdater -Encoding UTF8 -Force
-
-    # Launch it hidden and detached
     Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempUpdater`" -TargetScript `"$PSScriptRoot\LoginSplash.ps1`" -TargetVideo `"$videoPath`" -UrlScript `"$urlScript`" -UrlVideo `"$urlVideo`"" -WindowStyle Hidden
 }
 
-# --- DECISION ENGINE ---
+# --- MOTEUR DE DECISION (La boucle principale) ---
 function Start-DecisionEngine {
     $timer = New-Object System.Windows.Threading.DispatcherTimer
-    $timer.Interval = [TimeSpan]::FromMilliseconds(1000)
+    $timer.Interval = [TimeSpan]::FromSeconds($checkInterval)
+    
     $timer.Add_Tick({
         $elapsed = ([DateTime]::Now - $script:startTime).TotalSeconds
         
+        # 1. Sécurité absolue (Time out)
         if ($elapsed -ge $maxTimeoutSeconds) { Trigger-Exit; return }
-        if ($elapsed -lt $minExecutionTime) { $script:canExit = $false; return }
+        
+        # 2. Si on n'a pas encore atteint le temps minimum, on ne fait rien
+        if ($elapsed -lt $minExecutionTime) { return }
 
+        # 3. Analyse CPU (Méthode Rapide)
         try {
-            $cpu = Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction Stop -SampleInterval 1 -MaxSamples 1
-            $usage = [math]::Round($cpu.CounterSamples.CookedValue, 0)
-            if ($usage -le $cpuIdleThreshold) { $script:canExit = $true } else { $script:canExit = $false }
-        } catch { $script:canExit = $false }
+            if ($script:cpuCounter) {
+                $currentCpu = $script:cpuCounter.NextValue()
+            } else {
+                $currentCpu = 100 # Si le compteur a échoué, on force l'attente
+            }
+            
+            # Logique "Smart" : Est-ce que le PC est calme ?
+            if ($currentCpu -le $cpuIdleThreshold) {
+                $script:lowCpuStreak++
+            } else {
+                $script:lowCpuStreak = 0 # Reset si le CPU remonte
+            }
+
+            # Si le CPU est calme depuis assez longtemps -> On autorise la sortie
+            if ($script:lowCpuStreak -ge $cpuStableCount) {
+                $script:canExit = $true
+            }
+
+        } catch { 
+            # En cas d'erreur, on sort par sécurité
+            $script:canExit = $true 
+        }
     })
     $timer.Start()
 }
 
-# --- EXIT SEQUENCE ---
+# --- SEQUENCE DE SORTIE ---
 function Trigger-Exit {
     if ($script:isFadingOut) { return }
     $script:isFadingOut = $true
     
-    # 1. Unlock System Focus
-    [Win32Functions.Win32]::LockSetForegroundWindow(2) # 2 = UNLOCK
+    # 1. Déverrouillage Focus
+    [Win32Functions.Win32]::LockSetForegroundWindow(2) 
 
-    # 2. Launch the Update (Fire and Forget)
+    # 2. Lancer la mise à jour
     Start-BackgroundUpdate
 
     $closedCount = 0
     foreach ($win in $script:windows) {
         $sb = New-Object System.Windows.Media.Animation.Storyboard
+        $animFade = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0, 0.0, [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.8)))
         
-        $animFade = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0, 0.0, [System.Windows.Duration]::new([TimeSpan]::FromSeconds($fadeOutDuration)))
         [System.Windows.Media.Animation.Storyboard]::SetTarget($animFade, $win)
         [System.Windows.Media.Animation.Storyboard]::SetTargetProperty($animFade, [System.Windows.PropertyPath]::new("Opacity"))
         
+        # Fade Volume aussi
         $media = $win.Tag
         if ($media) {
-            $animVol = New-Object System.Windows.Media.Animation.DoubleAnimation($media.Volume, 0.0, [System.Windows.Duration]::new([TimeSpan]::FromSeconds($fadeOutDuration)))
+            $animVol = New-Object System.Windows.Media.Animation.DoubleAnimation($media.Volume, 0.0, [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.8)))
             [System.Windows.Media.Animation.Storyboard]::SetTarget($animVol, $media)
             [System.Windows.Media.Animation.Storyboard]::SetTargetProperty($animVol, [System.Windows.PropertyPath]::new("Volume"))
             $sb.Children.Add($animVol)
@@ -163,6 +179,7 @@ function Create-Window {
     $window.ShowInTaskbar = $false
     $window.Cursor = "None"
 
+    # Sortie d'urgence (5x Echap)
     $window.Add_KeyDown({
         if ($_.Key -eq "Escape") {
             $script:escCount++
@@ -178,9 +195,14 @@ function Create-Window {
     $mediaElement.Stretch = "UniformToFill"
     $mediaElement.Volume = 0.6
 
+    # Logique de boucle vidéo
     $mediaElement.Add_MediaEnded({
-        if ($script:canExit) { Trigger-Exit } 
-        else { $this.Position = [TimeSpan]::Zero; $this.Play() }
+        if ($script:canExit) { 
+            Trigger-Exit 
+        } else { 
+            $this.Position = [TimeSpan]::Zero
+            $this.Play() 
+        }
     })
     
     $mediaElement.Add_MediaFailed({ Trigger-Exit })
@@ -203,14 +225,14 @@ try {
         [void]$win.Show()
     }
 
-    # Lock System Focus
-    [Win32Functions.Win32]::LockSetForegroundWindow(1) # 1 = LOCK
+    # Verrouiller le système au premier plan
+    [Win32Functions.Win32]::LockSetForegroundWindow(1)
 
     Start-DecisionEngine
 
-    # Backup Watchdog (Visual Layer only)
+    # Watchdog visuel (Garde la fenêtre au dessus de tout)
     $script:watchdogTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:watchdogTimer.Interval = [TimeSpan]::FromMilliseconds(100) 
+    $script:watchdogTimer.Interval = [TimeSpan]::FromMilliseconds(200) 
     $script:watchdogTimer.Add_Tick({
         if (-not $script:isFadingOut) {
             foreach ($win in $script:windows) {
