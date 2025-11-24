@@ -1,24 +1,49 @@
 # Uninstall-Startup.ps1
-# Version: V2 "Debug Edition" (Ne se ferme pas en cas d'erreur)
+# Version: V3 "Path Finder Edition"
 # Language: English (Logic), French (Messages)
 
-# --- 0. AUTO-ELEVATION ADMIN ---
+# --- 0. RECUPERATION ROBUSTE DU CHEMIN ---
+# On essaie deux méthodes pour trouver où est ce fichier
+$currentScriptPath = $PSCommandPath
+if (-not $currentScriptPath) {
+    $currentScriptPath = $MyInvocation.MyCommand.Path
+}
+
+# Si après ça, le chemin est toujours vide, c'est que le fichier n'est pas sauvegardé ou exécuté bizarrement
+if (-not $currentScriptPath) {
+    Write-Host "ERREUR CRITIQUE : Le script ne trouve pas son propre chemin." -ForegroundColor Red
+    Write-Host "1. Assurez-vous que ce fichier est bien SAUVEGARDÉ sur votre disque." -ForegroundColor Yellow
+    Write-Host "2. Faites Clic-Droit sur le fichier > 'Exécuter avec PowerShell'." -ForegroundColor Yellow
+    Read-Host "Appuyez sur Entrée pour quitter..."
+    exit
+}
+
+# --- 1. AUTO-ELEVATION ADMIN ---
 $currentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
     Write-Host "Droits Admin requis. Relance du script..." -ForegroundColor Yellow
-    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
-    exit
+    
+    # On utilise le chemin qu'on a validé juste au-dessus
+    try {
+        Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$currentScriptPath`""
+        exit
+    } catch {
+        Write-Host "Impossible de relancer en Admin automatiquement." -ForegroundColor Red
+        Write-Host "Veuillez faire Clic-Droit sur le fichier > 'Exécuter en tant qu'administrateur'." -ForegroundColor Red
+        Read-Host "Entrée pour quitter..."
+        exit
+    }
 }
 
-# --- BLOC DE SÉCURITÉ PRINCIPAL ---
+# --- 2. BLOC DE DESINSTALLATION ---
 try {
     Clear-Host
-    Write-Host "=== LoginLight Désinstallateur ===" -ForegroundColor Cyan
+    Write-Host "=== LoginLight Désinstallateur V3 ===" -ForegroundColor Cyan
+    Write-Host "Mode : Administrateur" -ForegroundColor Green
     Write-Host ""
 
-    # CONFIGURATION
     $appName = "LoginLight"
     $taskName = "LoginLightSystem"
     $installDir = Join-Path $env:LOCALAPPDATA $appName
@@ -26,7 +51,7 @@ try {
     $legacyShortcut = Join-Path $startupFolder "$appName.lnk"
     $cleanupCount = 0
 
-    # --- 1. SUPPRESSION TÂCHE PLANIFIÉE ---
+    # A. SUPPRESSION TÂCHE PLANIFIÉE
     Write-Host "1. Vérification de la tâche planifiée..." -ForegroundColor Yellow
     try {
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -35,26 +60,28 @@ try {
             Write-Host "   [OK] Tâche système supprimée." -ForegroundColor Green
             $cleanupCount++
         } else {
-            Write-Host "   [INFO] Aucune tâche trouvée (déjà supprimée ?)." -ForegroundColor Gray
+            Write-Host "   [INFO] Aucune tâche trouvée." -ForegroundColor Gray
         }
     } catch {
-        Write-Host "   [ERREUR TÂCHE] $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "   [ERREUR] Impossible de supprimer la tâche : $($_.Exception.Message)" -ForegroundColor Red
     }
 
-    # --- 2. SUPPRESSION RACCOURCI ---
+    # B. SUPPRESSION RACCOURCI
     Write-Host "2. Vérification des raccourcis..." -ForegroundColor Yellow
     if (Test-Path $legacyShortcut) {
-        Remove-Item $legacyShortcut -Force -ErrorAction SilentlyContinue
-        Write-Host "   [OK] Raccourci de démarrage supprimé." -ForegroundColor Green
-        $cleanupCount++
+        try {
+            Remove-Item $legacyShortcut -Force -ErrorAction Stop
+            Write-Host "   [OK] Raccourci de démarrage supprimé." -ForegroundColor Green
+            $cleanupCount++
+        } catch { Write-Host "   [ERREUR] Raccourci bloqué." -ForegroundColor Red }
     } else {
         Write-Host "   [INFO] Aucun raccourci trouvé." -ForegroundColor Gray
     }
 
-    # --- 3. SUPPRESSION FICHIERS ---
+    # C. SUPPRESSION FICHIERS
     Write-Host "3. Nettoyage des fichiers..." -ForegroundColor Yellow
     if (Test-Path $installDir) {
-        # Tentative de tuer les processus fantômes qui bloqueraient les fichiers
+        # Tuer les processus fantômes
         try {
             $myPid = $PID
             Get-Process -Name "powershell" -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $myPid -and $_.MainWindowTitle -eq "" } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -62,32 +89,25 @@ try {
 
         try {
             Remove-Item $installDir -Recurse -Force -ErrorAction Stop
-            Write-Host "   [OK] Dossier d'installation supprimé ($installDir)." -ForegroundColor Green
+            Write-Host "   [OK] Dossier supprimé ($installDir)." -ForegroundColor Green
             $cleanupCount++
         } catch {
-            Write-Host "   [ERREUR FICHIER] Impossible de supprimer le dossier." -ForegroundColor Red
-            Write-Host "   Détail : $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "   -> Vérifie qu'aucun script n'est encore lancé." -ForegroundColor Yellow
+            Write-Host "   [ERREUR] Fichiers en cours d'utilisation." -ForegroundColor Red
         }
     } else {
-        Write-Host "   [INFO] Dossier d'installation introuvable." -ForegroundColor Gray
+        Write-Host "   [INFO] Dossier introuvable." -ForegroundColor Gray
     }
 
     Write-Host ""
     if ($cleanupCount -gt 0) {
-        Write-Host "SUCCÈS : Tout a été nettoyé." -ForegroundColor Green
+        Write-Host "SUCCÈS : LoginLight a été supprimé." -ForegroundColor Green
     } else {
-        Write-Host "TERMINE : Rien n'a été trouvé (déjà propre)." -ForegroundColor Yellow
+        Write-Host "TERMINE : Rien à nettoyer." -ForegroundColor Yellow
     }
 
 } catch {
-    # C'est ici qu'on attrape les erreurs fatales imprévues
-    Write-Host ""
-    Write-Host "!!! ERREUR FATALE !!!" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
-    Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+    Write-Host "ERREUR FATALE : $($_.Exception.Message)" -ForegroundColor Red
 } finally {
-    # CE BLOC S'EXECUTE TOUJOURS, MÊME SI CA PLANTE
     Write-Host ""
     Write-Host "Appuyez sur ENTREE pour fermer..." -ForegroundColor Cyan
     $null = [Console]::ReadLine()
